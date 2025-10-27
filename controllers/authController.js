@@ -208,7 +208,12 @@ const sendOTP = async (req, res) => {
             };
 
             //await transporter.sendMail(mailOptions);
-             await Resend.email.send(mailOptions);
+           await resend.emails.send({
+              from: mailOptions.from,
+              to: mailOptions.to,
+              subject: mailOptions.subject,
+              html: mailOptions.html
+            });
             console.log('Email sent successfully to:', email_address);
         } catch (emailError) {
             console.error(' Email failed (but OTP is in console):', emailError.message);
@@ -596,4 +601,5 @@ module.exports = {
     changePassword
 
 };
+
 
