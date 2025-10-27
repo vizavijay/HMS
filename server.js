@@ -15,7 +15,7 @@ app.use(helmet({
 
 // CORS configuration
 const corsOptions = {
-    origin: 'https://sclinedc.co.in',
+    origin: ['http://localhost:3000', 'https://sclinedc.co.in'],
     credentials: true,
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -116,5 +116,6 @@ process.on('uncaughtException', (err) => {
     console.error('  Uncaught Exception:', err);
     process.exit(1);
 });
+
 
 module.exports = app;
