@@ -1,8 +1,10 @@
+import { Resend } from 'resend';
 const db = require('../config/database');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 
+const resend = new Resend(process.env.RESEND_API_KEY);
 // Configure email transporter
 console.log(' Configuring Email Service...');
 console.log('Host:', process.env.EMAIL_HOST);
@@ -204,7 +206,8 @@ const sendOTP = async (req, res) => {
                 `
             };
 
-            await transporter.sendMail(mailOptions);
+            //await transporter.sendMail(mailOptions);
+             await Resend.email.send(mailOptions);
             console.log('Email sent successfully to:', email_address);
         } catch (emailError) {
             console.error(' Email failed (but OTP is in console):', emailError.message);
@@ -590,4 +593,5 @@ module.exports = {
     checkEmail,
     getLoginHistory,
     changePassword
+
 };
