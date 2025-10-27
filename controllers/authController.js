@@ -1,8 +1,9 @@
-import { Resend } from 'resend';
+
 const db = require('../config/database');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const { Resend } = require('resend');
 
 const resend = new Resend(process.env.RESEND_API_KEY);
 // Configure email transporter
@@ -595,3 +596,4 @@ module.exports = {
     changePassword
 
 };
+
