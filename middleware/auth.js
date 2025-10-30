@@ -32,6 +32,7 @@ const authenticateToken = (req, res, next) => {
 
             // Attach user info to request
             req.user = user;
+            console.log(user);
             next();
         });
 
@@ -79,7 +80,7 @@ const checkActiveUser = async (req, res, next) => {
         if (users.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'User not found'
+                message: 'No account found with this email address. Please check and try again.'
             });
         }
 

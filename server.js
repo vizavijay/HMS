@@ -10,12 +10,12 @@ const app = express();
 
 //middleware
 app.use(helmet({
-  crossOriginResourcePolicy: false // prevents interference with CORS
+    crossOriginResourcePolicy: false // prevents interference with CORS
 }));
 
 // CORS configuration
 const corsOptions = {
-     origin: ['http://localhost:3000', 'https://sclinedc.co.in', 'https://glenmark.nis-2025-27.sclinedc.co.in'],
+    origin: ['http://localhost:3000', 'https://sclinedc.co.in','https://glenmark.nis-2025-27.sclinedc.co.in'],
     credentials: true,
     optionsSuccessStatus: 200,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -34,6 +34,7 @@ const roleRoutes = require('./routes/roleManagement');
 const studyRoutes = require('./routes/studyManagement');
 const siteRoutes = require('./routes/siteManagement');
 const surveyRoutes = require('./routes/StudyRoutes');
+const auditRouter = require('./routes/audit.route')
 
 // register routes
 
@@ -67,6 +68,8 @@ app.use('/api/sites', siteRoutes);
 
 // study routes
 app.use('/api/survey', surveyRoutes);
+
+app.use('/api/audit', auditRouter);
 
 
 
@@ -117,7 +120,4 @@ process.on('uncaughtException', (err) => {
     process.exit(1);
 });
 
-
 module.exports = app;
-
-
