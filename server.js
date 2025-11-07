@@ -7,34 +7,18 @@ const db = require('./config/database');
 
 const app = express();
 
-// middleware
-app.use(
-  helmet({
-    crossOriginResourcePolicy: false, // prevents interference with CORS
-  })
-);
+//middleware
+app.use(helmet({
+    crossOriginResourcePolicy: false // prevents interference with CORS
+}));
 
-// CORS configuration - allow origins via env or fallback
-const allowedOrigins = (
-  process.env.CORS_ORIGINS || 'http://localhost:3000,https://sclinedc.co.in'
-)
-  .split(',')
-  .map((s) => s.trim());
-
+// CORS configuration
 const corsOptions = {
-  origin: function (origin, callback) {
-    // allow requests with no origin (mobile apps, curl)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
-      return callback(null, true);
-    } else {
-      return callback(new Error('CORS policy: origin not allowed'), false);
-    }
-  },
-  credentials: true,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+    origin: ['http://localhost:3000', 'https://sclinedc.co.in','https://glenmark.nis-2025-27.sclinedc.co.in'],
+    credentials: true,
+    optionsSuccessStatus: 200,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
 };
 app.use(cors(corsOptions));
 
@@ -141,3 +125,4 @@ process.on('uncaughtException', (err) => {
 });
 
 module.exports = app;
+
