@@ -1,4 +1,21 @@
+/**
+ * Generate an Excel workbook from an array of objects and stream it to the client as an .xlsx attachment.
+ *
+ * Creates a worksheet named "Data", uses the keys of the first object in `data` as column headers
+ * (styled with bold white text on a blue background), writes each object as a row, auto-sizes columns,
+ * and writes the resulting workbook to the provided Express response with appropriate content headers.
+ *
+ * @async
+ * @function downloadExcel
+ * @param {Array<Object>} data - Array of objects representing rows. The keys of the first object are used as column headers. Must be non-empty.
+ * @param {string} filename - Base filename (without extension) to send to the client; the response will be named `${filename}.xlsx`.
+ * @param {import('express').Response} res - Express response object to which the workbook will be written. The function sets
+ *                                           'Content-Type' and 'Content-Disposition' headers and writes the workbook stream to this response.
+ * @returns {Promise<void>} Resolves when the workbook has been successfully written to the response stream.
+ * @throws {Error} May throw if `data` is empty/invalid or if writing the workbook to the response fails.
+ */
 const ExcelJS = require('exceljs');
+
 async function downloadExcel(data, filename, res) {
   const workbook = new ExcelJS.Workbook();
   const worksheet = workbook.addWorksheet('Data');
@@ -39,7 +56,6 @@ async function downloadExcel(data, filename, res) {
 
   await workbook.xlsx.write(res);
 
-  // res.send({ success: true, status: 200 });
 }
 
 module.exports = downloadExcel;

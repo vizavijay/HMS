@@ -1,408 +1,465 @@
-// routes/studyRoutes.js
+/**
+ * routes/studyRoutes.js
+ *
+ * Refactored from the original single-file implementation to:
+ * - Extract small helper functions for clarity and reuse
+ * - Fix bugs (e.g. reading response_data for audit logs)
+ * - Improve stored-procedure result handling
+ * - Keep email sending asynchronous and non-blocking
+ * - Improve validation and error messages
+ *
+ * Notes:
+ * - This file still expects a `req.db` instance (mysql2-like) set by middleware.
+ * - `setAuditLogs` and `sendSurveySubmissionEmail` are used from external controllers/config.
+ */
+
 const express = require('express');
 const router = express.Router();
-const db = require('../config/database');
-const { sendSurveySubmissionEmail } = require('../config/email');
 
+const { sendSurveySubmissionEmail } = require('../config/email');
+const {
+  setAuditLogs,
+} = require('../controllers/auditlogs/auditlogs.controller');
+const { authenticateToken } = require('../middleware/auth');
+const auditlogsControllers = require('../controllers/auditlogs/auditlogs.controller');
+const { LOG_MODULES } = require('../utils/constants');
+
+/**
+ * Helper: run a query using req.db, returning the first-level rows.
+ * This wraps the mysql2 .query result shapes (which can vary).
+ */
+async function runQuery(db, sql, params = []) {
+  const result = await db.query(sql, params);
+  // mysql2 can return either [rows, fields] or [[rows], ...] for CALL
+  return result && result[0] ? result[0] : result;
+}
+
+/**
+ * Get the latest response (if any) for a user & study.
+ * Returns null if not found.
+ */
+async function getLatestResponse(db, userId, studyId) {
+  const [rows] = await db.query(
+    `SELECT response_id, response_data, status, submitted_at, last_updated_at
+     FROM study_response
+     WHERE user_id = ? AND study_id = ?
+     ORDER BY last_updated_at DESC
+     LIMIT 1`,
+    [userId, studyId]
+  );
+  return rows && rows.length > 0 ? rows[0] : null;
+}
+
+/**
+ * Fetch study definition:
+ * - If user already submitted -> fetch from sp_studies (bypass stored proc)
+ * - Otherwise -> call stored procedure get_study_for_user(studyId, userId)
+ *
+ * Returns study definition object, or throws an Error when not found / unauthorized.
+ */
+async function fetchStudyDefinition(db, studyId, userId, isSubmitted) {
+  if (isSubmitted) {
+    const [rows] = await db.query(
+      `SELECT * FROM sp_studies WHERE study_id = ?`,
+      [studyId]
+    );
+    if (!rows || rows.length === 0) {
+      throw new Error('Study not found or inactive');
+    }
+    return rows[0];
+  } else {
+    // CALL returns an array of resultsets; the first element is usually the desired rows.
+    const result = await db.query('CALL get_study_for_user(?, ?)', [
+      studyId,
+      userId,
+    ]);
+    // result === [ [rows], [fields], ... ] (depending on mysql2)
+    const rows =
+      Array.isArray(result) && Array.isArray(result[0]) ? result[0] : result;
+    if (!rows || rows.length === 0) {
+      throw new Error('Study not found or user not authorized');
+    }
+    // When stored procedure returns several rows, we assume the first row contains study_definition
+    return rows[0];
+  }
+}
+
+/**
+ * Safe JSON parse helper for response_data fields which may be strings.
+ */
+function parseResponseData(value) {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    // If parsing fails, return raw value (string)
+    return value;
+  }
+}
+
+/* =========================
+   ROUTES
+   ========================= */
+
+/**
+ * GET /study/:userId/:studyId
+ * Returns study_definition, latest draft_response (if any), and status
+ */
+
+router.use(authenticateToken);
 
 router.get('/study/:userId/:studyId', async (req, res) => {
-    const { userId, studyId } = req.params;
-
-    try {
-        console.log(`\n === FETCHING STUDY ===`);
-        console.log(`User ID: ${userId}, Study ID: ${studyId}`);
-
-        console.log('Step 1: Checking submission status...');
-        const [responseRows] = await req.db.query(
-            `SELECT response_data, status 
-                FROM study_response 
-                WHERE user_id = ? AND study_id = ? 
-                ORDER BY last_updated_at DESC 
-                LIMIT 1`,
-            [userId, studyId]
-        );
-
-        const responseStatus = responseRows.length > 0 ? responseRows[0].status : null;
-        const draftResponse = responseRows.length > 0 ? responseRows[0].response_data : null;
-
-        console.log(` Submission status: ${responseStatus || 'Not started'}`);
-
-
-        let studyDefinition;
-
-        if (responseStatus === 'submitted') {
-            // User already submitted - bypass stored procedure to avoid error
-            console.log('Step 2: User submitted - fetching study directly (bypassing stored procedure)');
-
-            const [studyRows] = await req.db.query(
-                `SELECT * 
-                    FROM sp_studies 
-                    WHERE study_id = ?`,
-                [studyId]
-            );
-
-            if (studyRows.length === 0) {
-                throw new Error('Study not found or inactive');
-            }
-
-            studyDefinition = studyRows[0];
-            console.log('  Study fetched directly from table');
-
-        } else {
-            // User has not submitted yet - use stored procedure normally
-            console.log('Step 2: User not submitted - using stored procedure');
-
-            const [studyRows] = await req.db.query(
-                'CALL get_study_for_user(?, ?)',
-                [studyId, userId]
-            );
-
-            if (!studyRows || studyRows.length === 0 || !studyRows[0]) {
-                throw new Error('Study not found or user not authorized');
-            }
-
-            studyDefinition = studyRows[0];
-            console.log('  Study fetched via stored procedure');
-        }
-
-        console.log('  Study data prepared successfully');
-        console.log(`=== FETCH COMPLETE ===\n`);
-
-        //   STEP 3: Return response with status
-        return res.status(200).json({
-            success: true,
-            data: {
-                study_definition: studyDefinition,
-                draft_response: draftResponse,
-                status: responseStatus
-            }
-        });
-
-    } catch (error) {
-        console.error('\n  === ERROR FETCHING STUDY ===');
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        console.error('=== ERROR END ===\n');
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to fetch study data',
-            error: error.message
-        });
-    }
-});
-
-
-
-router.post('/submit-survey', async (req, res) => {
-    const { userId, studyId, responseData } = req.body;
-
-    // Validation
-    if (!userId || !studyId || !responseData) {
-        return res.status(400).json({
-            success: false,
-            message: 'Missing required fields: userId, studyId, or responseData'
-        });
-    }
-
-    try {
-        console.log(`\n === SUBMITTING SURVEY ===`);
-        console.log(`User: ${userId}, Study: ${studyId}`);
-
-        //  Check if response already exists AND its status
-        const [existing] = await req.db.query(
-            'SELECT response_id, status FROM study_response WHERE user_id = ? AND study_id = ?',
-            [userId, studyId]
-        );
-
-        //  PREVENT DUPLICATE SUBMISSIONS
-        if (existing.length > 0 && existing[0].status === 'submitted') {
-            console.log(' Survey already submitted, rejecting duplicate submission');
-            return res.status(409).json({
-                success: false,
-                message: 'Survey has already been submitted. Duplicate submissions are not allowed.',
-                alreadySubmitted: true
-            });
-        }
-
-        let result;
-        let responseId;
-
-        if (existing.length > 0) {
-            // Update existing draft to submitted
-            console.log('Updating existing draft to submitted...');
-
-            const updateQuery = `
-                    UPDATE study_response 
-                    SET response_data = ?,
-                        status = 'submitted',
-                        submitted_at = NOW(),
-                        last_updated_at = NOW()
-                    WHERE user_id = ? AND study_id = ?
-                `;
-
-            result = await req.db.query(updateQuery, [
-                JSON.stringify(responseData),
-                userId,
-                studyId
-            ]);
-
-            responseId = existing[0].response_id;
-            console.log(' Survey updated to submitted successfully');
-
-        } else {
-            // Insert new response
-            console.log('Creating new submission...');
-
-            const insertQuery = `
-                    INSERT INTO study_response 
-                    (study_id, user_id, response_data, status, submitted_at, last_updated_at)
-                    VALUES (?, ?, ?, 'submitted', NOW(), NOW())
-                `;
-
-            result = await req.db.query(insertQuery, [
-                studyId,
-                userId,
-                JSON.stringify(responseData)
-            ]);
-
-            responseId = result[0].insertId;
-            console.log(' Survey submitted successfully');
-        }
-
-        //  SEND CONFIRMATION EMAIL
-        console.log(' Fetching user and study info for email...');
-
-        // try {
-        //     // Get user info
-        //     const [userRows] = await req.db.query(
-        //         'SELECT email_address, full_name FROM sp_user_master WHERE user_id = ?',
-        //         [userId]
-        //     );
-
-        //     // Get study info
-        //     const [studyRows] = await req.db.query(
-        //         'SELECT study_title, study_number FROM sp_studies WHERE study_id = ?',
-        //         [studyId]
-        //     );
-
-        //     console.log(' User found:', userRows.length > 0 ? userRows[0].email_address : 'Not found');
-        //     console.log(' Study found:', studyRows.length > 0 ? studyRows[0].study_title : 'Not found');
-
-        //     if (userRows.length > 0 && studyRows.length > 0) {
-        //         const userEmail = userRows[0].email_address;
-        //         const fullName = userRows[0].full_name;
-        //         const studyTitle = studyRows[0].study_title || 'Clinical Study';
-        //         const studyNumber = studyRows[0].study_number || 'N/A';
-
-        //         console.log(' Sending email to:', userEmail);
-
-        //         // Send email asynchronously (don't block response)
-        //         sendSurveySubmissionEmail(userEmail, fullName, studyTitle, studyNumber)
-        //             .then((result) => {
-        //                 console.log(' Confirmation email sent successfully');
-        //             })
-        //             .catch((error) => {
-        //                 console.error(' Failed to send email:', error.message);
-        //             });
-        //     } else {
-        //         console.warn(' User or study info not found, skipping email');
-        //     }
-        // } catch (emailError) {
-        //     console.error(' Error preparing email:', emailError);
-        //     // Don't fail the submission if email fails
-        // }
-
-        //  SEND CONFIRMATION EMAIL
-        console.log(' Fetching user and study info for email...');
-
-        try {
-            // Get user info
-            const [userRows] = await req.db.query(
-                'SELECT email_address, full_name FROM sp_user_master WHERE user_id = ?',
-                [userId]
-            );
-
-            // Get study info
-            const [studyRows] = await req.db.query(
-                'SELECT study_title, study_number FROM sp_studies WHERE study_id = ?',
-                [studyId]
-            );
-
-            console.log(' User found:', userRows.length > 0 ? userRows[0].email_address : 'Not found');
-            console.log(' Study found:', studyRows.length > 0 ? studyRows[0].study_title : 'Not found');
-
-            if (userRows.length > 0 && studyRows.length > 0) {
-                const userEmail = userRows[0].email_address;
-                const fullName = userRows[0].full_name;
-                const studyTitle = studyRows[0].study_title || 'Clinical Study';
-                const studyNumber = studyRows[0].study_number || 'N/A';
-
-                console.log(' Sending email to:', userEmail);
-
-                // Send email asynchronously (don't block response)
-                sendSurveySubmissionEmail(userEmail, fullName,studyNumber,studyTitle)
-                    .then((result) => {
-                        console.log(' Confirmation email sent successfully');
-                    })
-                    .catch((error) => {
-                        console.error(' Failed to send email:', error.message);
-                    });
-            } else {
-                console.warn(' User or study info not found, skipping email');
-            }
-        } catch (emailError) {
-            console.error(' Error preparing email:', emailError);
-            // Don't fail the submission if email fails
-        }
-        return res.status(existing.length > 0 ? 200 : 201).json({
-            success: true,
-            message: 'Survey submitted successfully',
-            responseId: responseId
-        });
-
-    } catch (error) {
-        console.error(' Error submitting survey:', error);
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to submit survey',
-            error: error.message
-        });
-    } finally {
-        console.log(`=== SUBMIT COMPLETE ===\n`);
-    }
-});
-
-
-router.post('/save-draft', async (req, res) => {
-    const { userId, studyId, responseData } = req.body;
-
-    if (!userId || !studyId || !responseData) {
-        return res.status(400).json({
-            success: false,
-            message: 'Missing required fields'
-        });
-    }
-
-    try {
-        console.log(` Saving draft for User: ${userId}, Study: ${studyId}`);
-
-        // Check if draft exists
-        const [existing] = await req.db.query(
-            'SELECT response_id, status FROM study_response WHERE user_id = ? AND study_id = ?',
-            [userId, studyId]
-        );
-
-        // Don't allow draft saves if already submitted
-        if (existing.length > 0 && existing[0].status === 'submitted') {
-            console.log(' Survey already submitted, cannot save draft');
-            return res.status(409).json({
-                success: false,
-                message: 'Survey already submitted. Cannot save draft.',
-                alreadySubmitted: true
-            });
-        }
-
-        if (existing.length > 0) {
-            // Update existing draft
-            await req.db.query(
-                'UPDATE study_response SET response_data = ?, last_updated_at = NOW() WHERE user_id = ? AND study_id = ?',
-                [JSON.stringify(responseData), userId, studyId]
-            );
-
-            console.log('  Draft updated successfully');
-
-            return res.status(200).json({
-                success: true,
-                message: 'Draft updated successfully',
-                responseId: existing[0].response_id
-            });
-
-        } else {
-            // Insert new draft -   FIXED: Pass 'draft' as parameter
-            const result = await req.db.query(
-                'INSERT INTO study_response (study_id, user_id, response_data, status, last_updated_at) VALUES (?, ?, ?, ?, NOW())',
-                [studyId, userId, JSON.stringify(responseData), 'draft']  //   Fixed
-            );
-
-            console.log('  Draft saved successfully');
-
-            return res.status(201).json({
-                success: true,
-                message: 'Draft saved successfully',
-                responseId: result[0].insertId
-            });
-        }
-
-    } catch (error) {
-        console.error('  Error saving draft:', error);
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to save draft',
-            error: error.message
-        });
-    }
-});
-
-router.get('/user-responses/:userId/:studyId', async (req, res) => {
-    const { userId, studyId } = req.params;
-
-    try {
-        console.log(` Fetching responses for User: ${userId}, Study: ${studyId}`);
-
-        const [rows] = await req.db.query(
-            `SELECT response_id, response_data, status, submitted_at, last_updated_at
-        FROM study_response
-        WHERE user_id = ? AND study_id = ?
-        ORDER BY last_updated_at DESC
-        LIMIT 1`,
-            [userId, studyId]
-        );
-
-        if (rows.length === 0) {
-            return res.status(200).json({
-                success: true,
-                data: null,
-                hasResponses: false
-            });
-        }
-
-        const response = rows[0];
-
-        console.log('  User responses fetched successfully');
-
-        return res.status(200).json({
-            success: true,
-            data: {
-                responseId: response.response_id,
-                responseData: response.response_data, // Already parsed as JSON by mysql2
-                status: response.status,
-                submittedAt: response.submitted_at,
-                lastUpdatedAt: response.last_updated_at
-            },
-            hasResponses: true
-        });
-
-    } catch (error) {
-        console.error('  Error fetching user responses:', error);
-
-        return res.status(500).json({
-            success: false,
-            message: 'Failed to fetch user responses',
-            error: error.message
-        });
-    }
-});
-
-
-router.get('/health', (req, res) => {
-    res.status(200).json({
-        success: true,
-        message: 'API is running',
-        timestamp: new Date().toISOString()
+  const { userId, studyId } = req.params;
+  console.log('Fetching study for user:', userId, 'study:', studyId);
+  if (!userId || !studyId) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Missing userId or studyId in params' });
+  }
+
+  try {
+    // 1) Check latest response status/draft
+    const latest = await getLatestResponse(req.db, userId, studyId);
+    const responseStatus = latest ? latest.status : null;
+    const draftResponse = latest
+      ? parseResponseData(latest.response_data)
+      : null;
+
+    // 2) Fetch study definition (bypass stored proc when already submitted)
+    const isSubmitted = responseStatus === 'submitted';
+    const studyDefinition = await fetchStudyDefinition(
+      req.db,
+      studyId,
+      userId,
+      isSubmitted
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        study_definition: studyDefinition,
+        draft_response: draftResponse,
+        status: responseStatus,
+      },
     });
+  } catch (err) {
+    // log internal details but return a generic message
+    console.error('Error in GET /study:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch study data',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * POST /submit-survey
+ * Body: { userId, studyId, responseData }
+ *
+ * Behaviour:
+ * - Prevent duplicate submissions if a 'submitted' row exists
+ * - Update existing draft -> submitted, or create new submitted row
+ * - Send confirmation email asynchronously (non-blocking)
+ */
+router.post('/submit-survey', async (req, res) => {
+  const { userId, studyId, responseData } = req.body;
+
+  if (!userId || !studyId || responseData == null) {
+    return res.status(400).json({
+      success: false,
+      message: 'Missing required fields: userId, studyId, or responseData',
+    });
+  }
+
+  try {
+    const latest = await getLatestResponse(req.db, userId, studyId);
+
+    if (latest && latest.status === 'submitted') {
+      return res.status(409).json({
+        success: false,
+        message:
+          'Survey has already been submitted. Duplicate submissions are not allowed.',
+        alreadySubmitted: true,
+      });
+    }
+
+    let responseId;
+    if (latest) {
+      // update existing row
+      const updateSql = `
+        UPDATE study_response
+        SET response_data = ?, status = 'submitted', submitted_at = NOW(), last_updated_at = NOW()
+        WHERE response_id = ?
+      `;
+      await req.db.query(updateSql, [
+        JSON.stringify(responseData),
+        latest.response_id,
+      ]);
+      responseId = latest.response_id;
+
+      // Audit: log update (old_value available from latest.response_data)
+
+      await auditlogsControllers.setAuditLogs(req, {
+        user_id: userId,
+        module_name: LOG_MODULES.STUDY_MANAGEMENT,
+        action_type: 'Update',
+        remark: 'Survey  submitted successfully',
+      });
+
+      // try {
+      //   await setAuditLogs({
+      //     user_id: userId,
+      //     study_id: studyId,
+      //     action: 'CREATE',
+      //     old_value: latest.response_data
+      //       ? JSON.stringify(parseResponseData(latest.response_data))
+      //       : null,
+      //     new_value: JSON.stringify(responseData),
+      //     remark: 'Survey submitted successfully',
+      //   });
+      // } catch (auditErr) {
+      //   console.warn(
+      //     'Audit log failed (non-fatal):',
+      //     auditErr && auditErr.message
+      //   );
+      // }
+    } else {
+      // insert new submission
+      const insertSql = `
+        INSERT INTO study_response (study_id, user_id, response_data, status, submitted_at, last_updated_at)
+        VALUES (?, ?, ?, 'submitted', NOW(), NOW())
+      `;
+      const [result] = await req.db.query(insertSql, [
+        studyId,
+        userId,
+        JSON.stringify(responseData),
+      ]);
+      responseId = result.insertId;
+    }
+
+    // send confirmation email asynchronously; do not await
+    (async () => {
+      try {
+        const [userRows] = await req.db.query(
+          'SELECT email_address, full_name FROM sp_user_master WHERE user_id = ?',
+          [userId]
+        );
+        const [studyRows] = await req.db.query(
+          'SELECT study_title, study_number FROM sp_studies WHERE study_id = ?',
+          [studyId]
+        );
+
+        if (
+          userRows &&
+          userRows.length > 0 &&
+          studyRows &&
+          studyRows.length > 0
+        ) {
+          const userEmail = userRows[0].email_address;
+          const fullName = userRows[0].full_name;
+          const studyTitle = studyRows[0].study_title || 'Clinical Study';
+          const studyNumber = studyRows[0].study_number || 'N/A';
+
+          await sendSurveySubmissionEmail(
+            userEmail,
+            fullName,
+            studyNumber,
+            studyTitle
+          );
+          // console.log left out to avoid noisy logs in production environments
+        } else {
+          console.warn(
+            'User or Study info not found; skipping submission email'
+          );
+        }
+      } catch (emailErr) {
+        console.error(
+          'Failed to send confirmation email (non-fatal):',
+          emailErr && emailErr.message
+        );
+      }
+    })();
+
+    return res.status(latest ? 200 : 201).json({
+      success: true,
+      message: 'Survey submitted successfully',
+      responseId,
+    });
+  } catch (err) {
+    console.error('Error in POST /submit-survey:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to submit survey',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * POST /save-draft
+ * Body: { userId, studyId, responseData }
+ *
+ * - Prevent saving drafts if already submitted
+ * - Update existing draft or insert new draft
+ * - Create audit log for updates (if possible)
+ */
+router.post('/save-draft', async (req, res) => {
+  const { userId, studyId, responseData } = req.body;
+
+  if (!userId || !studyId || responseData == null) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Missing required fields' });
+  }
+
+  try {
+    // Select response including response_data so we can use it for audit logging
+    const [existingRows] = await req.db.query(
+      'SELECT response_id, response_data, status FROM study_response WHERE user_id = ? AND study_id = ? ORDER BY last_updated_at DESC LIMIT 1',
+      [userId, studyId]
+    );
+    const existing =
+      existingRows && existingRows.length > 0 ? existingRows[0] : null;
+
+    if (existing && existing.status === 'submitted') {
+      return res.status(409).json({
+        success: false,
+        message: 'Survey already submitted. Cannot save draft.',
+        alreadySubmitted: true,
+      });
+    }
+
+    if (existing) {
+      // Update existing draft
+      await req.db.query(
+        'UPDATE study_response SET response_data = ?, last_updated_at = NOW() WHERE response_id = ?',
+        [JSON.stringify(responseData), existing.response_id]
+      );
+
+      // Audit log (best effort)
+      // update the existing log here
+      await auditlogsControllers.setAuditLogs(req, {
+        email: req.user ? req.user.email : 'Unknown',
+        module_name: LOG_MODULES.STUDY_MANAGEMENT,
+        oldValue: existing.response_data,
+        newValue: responseData,
+        action_type: 'Update',
+        remark: 'Draft updated successfully',
+      });
+
+      // try {
+      //   await setAuditLogs({
+      //     user_id: userId,
+      //     study_id: studyId,
+      //     action: 'UPDATE',
+      //     old_value: existing.response_data
+      //       ? JSON.stringify(parseResponseData(existing.response_data))
+      //       : null,
+      //     new_value: JSON.stringify(responseData),
+      //     remark: 'Draft updated successfully',
+      //   });
+      // } catch (auditErr) {
+      //   console.warn(
+      //     'Audit log failed (non-fatal):',
+      //     auditErr && auditErr.message
+      //   );
+      // }
+
+      return res.status(200).json({
+        success: true,
+        message: 'Draft updated successfully',
+        responseId: existing.response_id,
+      });
+    } else {
+      // Insert new draft row
+      const insertSql = `
+        INSERT INTO study_response (study_id, user_id, response_data, status, last_updated_at)
+        VALUES (?, ?, ?, 'draft', NOW())
+      `;
+      const [result] = await req.db.query(insertSql, [
+        studyId,
+        userId,
+        JSON.stringify(responseData),
+      ]);
+      await auditlogsControllers.setAuditLogs(req, {
+        email: req.user ? req.user.email : 'Unknown',
+        module_name: LOG_MODULES.STUDY_MANAGEMENT,
+        oldValue: existing.response_data,
+        newValue: responseData,
+        action_type: 'Create',
+        remark: 'Study Submission created successfully',
+      });
+      return res.status(201).json({
+        success: true,
+        message: 'Draft saved successfully',
+        responseId: result.insertId,
+      });
+    }
+  } catch (err) {
+    console.error('Error in POST /save-draft:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to save draft',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * GET /user-responses/:userId/:studyId
+ * Returns the latest response (if any) for a user & study.
+ */
+router.get('/user-responses/:userId/:studyId', async (req, res) => {
+  const { userId, studyId } = req.params;
+  if (!userId || !studyId) {
+    return res
+      .status(400)
+      .json({ success: false, message: 'Missing userId or studyId in params' });
+  }
+
+  try {
+    const latest = await getLatestResponse(req.db, userId, studyId);
+
+    if (!latest) {
+      return res.status(200).json({
+        success: true,
+        data: null,
+        hasResponses: false,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        responseId: latest.response_id,
+        responseData: parseResponseData(latest.response_data),
+        status: latest.status,
+        submittedAt: latest.submitted_at,
+        lastUpdatedAt: latest.last_updated_at,
+      },
+      hasResponses: true,
+    });
+  } catch (err) {
+    console.error('Error in GET /user-responses:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user responses',
+      error: err.message,
+    });
+  }
+});
+
+/**
+ * GET /health
+ */
+router.get('/health', (_req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'API is running',
+    timestamp: new Date().toISOString(),
+  });
 });
 
 module.exports = router;

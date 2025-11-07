@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
+const auditlogsControllers = require('../controllers/auditlogs/auditlogs.controller');
 
 // get all roles with pagination
 router.post('/list', async (req, res) => {
@@ -195,21 +196,12 @@ router.post('/create', async (req, res) => {
         `, [result.insertId]);
 
         // Log to audit trail
-        await db.query(`
-            INSERT INTO sp_audit_trail (
-                user_id, role_id, module_name, action_type,
-                record_id, old_value, new_value, ip_address
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-            created_by,
-            result.insertId,
-            'Role Management',
-            'Create',
-            result.insertId,
-            null,
-            JSON.stringify(newRole[0]),
-            req.ip
-        ]);
+       await auditlogsControllers.setAuditLogs(req, {
+           email: req.user ? req.user.email : 'Unknown',
+           module_name: LOG_MODULES.ROLE_MANAGEMENT,
+           action_type: 'create',
+           remark: `User created a new role: ${newRole[0].role_name}`,
+       });
 
         res.status(201).json({
             success: true,
@@ -318,7 +310,7 @@ router.put('/:role_id', async (req, res) => {
         await db.query(`
             INSERT INTO sp_audit_trail (
                 user_id, role_id, module_name, action_type,
-                record_id, old_value, new_value, ip_address
+                field_name, old_value, new_value, ip_address
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `, [
             updated_by,
@@ -389,7 +381,7 @@ router.delete('/:role_id', async (req, res) => {
         await db.query(`
             INSERT INTO sp_audit_trail (
                 user_id, role_id, module_name, action_type,
-                record_id, old_value, new_value, ip_address
+                field_name, old_value, new_value, ip_address
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `, [
             deleted_by,
@@ -488,7 +480,7 @@ router.get('/:role_id/history', async (req, res) => {
                 u.full_name as performed_by
             FROM sp_audit_trail at
             LEFT JOIN sp_user_master u ON at.user_id = u.user_id
-            WHERE at.record_id = ? AND at.module_name = 'Role Management'
+            WHERE at.field_name = ? AND at.module_name = 'Role Management'
             ORDER BY at.timestamp DESC
             LIMIT ? OFFSET ?
         `;

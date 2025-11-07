@@ -181,7 +181,7 @@ const sendWelcomeEmail = async (email, fullName, roleName, siteName) => {
             
             <p>Your account has been successfully created on the <strong>SclinEDC Live</strong>. Below are your account details:</p>
             
-           <div class="info-box">
+            <div class="info-box">
                 <ul>
                     <li><strong>Full Name:</strong> ${fullName}</li>
                     <li><strong>Email Address:</strong> ${email}</li>
@@ -192,11 +192,6 @@ const sendWelcomeEmail = async (email, fullName, roleName, siteName) => {
             
             <p>You can access the portal using your registered email address along with the system-generated OTP, which will be sent separately during login.</p>
             
-            <div class="info-box">
-                <ul>
-                    <li><strong>URL:</strong>https://glenmark.nis-2025-27.sclinedc.co.in/</li>           
-                </ul>
-            </div>
             <div class="important-box">
                 <p><strong>Important:</strong></p>
                 <ul>
@@ -297,5 +292,4 @@ module.exports = {
     sendOTPEmail,
     sendWelcomeEmail,
     sendSurveySubmissionEmail
-
 };
