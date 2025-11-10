@@ -2,7 +2,10 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/database');
 const auditlogsControllers = require('../controllers/auditlogs/auditlogs.controller');
+const { authenticateToken } = require('../middleware/auth');
 
+
+router.use(authenticateToken);
 // get all roles with pagination
 router.post('/list', async (req, res) => {
     try {

@@ -204,27 +204,9 @@ router.post('/submit-survey', async (req, res) => {
       await auditlogsControllers.setAuditLogs(req, {
         user_id: userId,
         module_name: LOG_MODULES.STUDY_MANAGEMENT,
-        action_type: 'Update',
+        action_type: 'Create',
         remark: 'Survey  submitted successfully',
       });
-
-      // try {
-      //   await setAuditLogs({
-      //     user_id: userId,
-      //     study_id: studyId,
-      //     action: 'CREATE',
-      //     old_value: latest.response_data
-      //       ? JSON.stringify(parseResponseData(latest.response_data))
-      //       : null,
-      //     new_value: JSON.stringify(responseData),
-      //     remark: 'Survey submitted successfully',
-      //   });
-      // } catch (auditErr) {
-      //   console.warn(
-      //     'Audit log failed (non-fatal):',
-      //     auditErr && auditErr.message
-      //   );
-      // }
     } else {
       // insert new submission
       const insertSql = `

@@ -24,18 +24,28 @@ router.post('/list', async (req, res) => {
 
     const offset = (page - 1) * limit;
 
+    // Common JOINs for both queries
+    const joins = `
+      LEFT JOIN sp_role_master r ON u.role_id = r.role_id
+      LEFT JOIN sp_studies st ON u.study_id = st.study_id
+      LEFT JOIN sp_site_master si ON u.site_id = si.site_id
+      LEFT JOIN sp_user_master creator ON u.created_by = creator.user_id
+      LEFT JOIN sp_user_master updater ON u.updated_by = updater.user_id
+    `;
+
     // Build WHERE clause dynamically
     let whereConditions = [];
     let queryParams = [];
 
     if (search) {
-      whereConditions.push(`(
-                u.email_address LIKE ? OR 
-                u.full_name LIKE ? OR
-                u.contact_number LIKE ?
-            )`);
       const searchTerm = `%${search}%`;
-      queryParams.push(searchTerm, searchTerm, searchTerm);
+      whereConditions.push(`(
+        u.email_address LIKE ? OR 
+        u.full_name LIKE ? OR
+        u.contact_number LIKE ? OR
+        si.site_name LIKE ?
+      )`);
+      queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
     }
 
     if (role_id) {
@@ -63,58 +73,56 @@ router.post('/list', async (req, res) => {
         ? `WHERE ${whereConditions.join(' AND ')}`
         : '';
 
-    // Get total count
+    // ✅ Count query (includes the same JOINs)
     const countQuery = `
-            SELECT COUNT(*) as total 
-            FROM sp_user_master u
-            ${whereClause}
-        `;
+      SELECT COUNT(*) as total 
+      FROM sp_user_master u
+      ${joins}
+      ${whereClause}
+    `;
 
     const [countResult] = await db.query(countQuery, queryParams);
     const totalRecords = countResult[0].total;
     const totalPages = Math.ceil(totalRecords / limit);
 
+    // ✅ Data query
     const dataQuery = `
-            SELECT 
-                u.user_id,
-                u.full_name,
-                u.email_address,
-                u.contact_number,
-                u.status,
-                u.created_at,
-                u.updated_at,
-                r.role_id,
-                r.role_name,
-                st.study_id,
-                st.study_title,
-                st.study_number,
-                si.site_id,
-                si.site_name,
-                si.site_code,
-                creator.full_name as created_by_name,
-                updater.full_name as updated_by_name
-            FROM sp_user_master u
-            LEFT JOIN sp_role_master r ON u.role_id = r.role_id
-            LEFT JOIN sp_studies st ON u.study_id = st.study_id
-            LEFT JOIN sp_site_master si ON u.site_id = si.site_id
-            LEFT JOIN sp_user_master creator ON u.created_by = creator.user_id
-            LEFT JOIN sp_user_master updater ON u.updated_by = updater.user_id
-            ${whereClause}
-            ORDER BY u.created_at DESC
-            LIMIT ? OFFSET ?
-        `;
+      SELECT 
+        u.user_id,
+        u.full_name,
+        u.email_address,
+        u.contact_number,
+        u.status,
+        u.created_at,
+        u.updated_at,
+        r.role_id,
+        r.role_name,
+        st.study_id,
+        st.study_title,
+        st.study_number,
+        si.site_id,
+        CONCAT(si.site_code, '_', si.site_name) AS site_name,
+        si.site_code,
+        creator.full_name as created_by_name,
+        updater.full_name as updated_by_name
+      FROM sp_user_master u
+      ${joins}
+      ${whereClause}
+      ORDER BY u.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
 
-    const dataParams = [...queryParams, limit, offset];
+    const dataParams = [...queryParams, Number(limit), Number(offset)];
     const [users] = await db.query(dataQuery, dataParams);
 
     res.json({
       success: true,
       data: users,
       pagination: {
-        currentPage: page,
+        currentPage: Number(page),
         totalPages,
         totalRecords,
-        limit,
+        limit: Number(limit),
       },
     });
   } catch (error) {
